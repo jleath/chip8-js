@@ -1,3 +1,5 @@
+"use strict";
+
 let Chip8Emulator = (function() {
   const MEMORY_SIZE = 0x1000;
   const FONT_START_ADDRESS = 0x50;
@@ -27,7 +29,13 @@ let Chip8Emulator = (function() {
     0xF0, 0x90, 0xF0, 0xA0, 0x90, // R
   ];
 
+  const KEY_CODES = {
+    '1': 0, '2': 1, '3': 2, '4': 3, 'q': 4, 'w': 5, 'e': 6, 'r': 7,
+    'a': 8, 's': 9, 'd': 10, 'f': 11, 'z': 12, 'x': 13, 'c': 14, 'v': 15,
+  };
+
   function Chip8Emulator() {
+    this.cyclesPerFrame = 20;
     this.reset();
   }
 
@@ -48,11 +56,23 @@ let Chip8Emulator = (function() {
     this.haltedMsg = '';
     this.currKey = undefined;
     this.waiting = false;
+    this.waitingRegister = undefined;
+    this.clearDisplay = false;
   };
+
+  Chip8Emulator.prototype.getKeyCode = function(key) {
+    return KEY_CODES[key];
+  }
 
   Chip8Emulator.prototype.halt = function(msg) {
     this.halted = true;
     this.haltedMsg = msg;
+  };
+
+  Chip8Emulator.prototype.loadProgram = function(programData) {
+    this.reset();
+    this.pixels.fill(0);
+    this.memory.set(programData, PROGRAM_START_ADDRESS);
   };
 
   Chip8Emulator.prototype.cycle = function() {
@@ -69,6 +89,20 @@ let Chip8Emulator = (function() {
     let x = (instruction >> 8) & 0xF;
     let opcode = (instruction >> 12) & 0xF;
 
+    if (instruction === 0x00E0) {
+      this.pixels.fill(0);
+      this.clearDisplay = true;
+      return;
+    }
+    if (instruction === 0x00EE) {
+      if (this.stack.length === 0) {
+        this.halt('Attempt to pop from empty stack');
+        return;
+      }
+      this.PC = this.stack.pop();
+      return;
+    }
+
     switch (opcode) {
       case 0x1:
         this.PC = address;
@@ -81,7 +115,7 @@ let Chip8Emulator = (function() {
         if (this.registers[x] === byte) this.PC += 2;
         break;
       case 0x4:
-        if (this.registers[x] === this.registers[y]) this.PC += 2;
+        if (this.registers[x] !== byte) this.PC += 2;
         break;
       case 0x5:
         if (this.registers[x] === this.registers[y]) this.PC += 2;
@@ -167,11 +201,11 @@ let Chip8Emulator = (function() {
             let masked = this.memory[this.I + row] & mask;
             if (masked !== 0) {
               let index = (yPos * 64) + xPos;
-              if (this.backBuffer[index] === 1) {
-                this.pixels = 0
+              if (this.pixels[index] === 1) {
+                this.pixels[index] = 0
                 this.registers[0xF] = 1;
               } else {
-                this.pixels = 1;
+                this.pixels[index] = 1;
               }
             }
             mask = mask >>> 1;
@@ -198,6 +232,7 @@ let Chip8Emulator = (function() {
               this.currKey = undefined;
             } else {
               this.waiting = true;
+              this.waitingRegister = x;
             }
             break;
           case 0x15:
@@ -207,7 +242,7 @@ let Chip8Emulator = (function() {
             this.st = this.registers[x];
             break;
           case 0x1E:
-            this.I = this.registers[x];
+            this.I += this.registers[x];
             if (this.I > 0x1000) this.registers[0xF] = 1;
             break;
           case 0x29:
@@ -218,7 +253,7 @@ let Chip8Emulator = (function() {
               this.halt(`Invalid memory access: ${this.I + 2}`);
               return;
             }
-            let value = this.register[x];
+            let value = this.registers[x];
             this.memory[this.I] = Math.floor(value / 100);
             this.memory[this.I + 1] = Math.floor(value / 10) % 10;
             this.memory[this.I + 2] = value % 10;
@@ -242,6 +277,9 @@ let Chip8Emulator = (function() {
             }
             break;
         }
+        break;
+      default:
+        console.log(`unrecognized instruction: ${instruction}`)
         break;
     }
   }
