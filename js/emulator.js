@@ -1,5 +1,9 @@
 "use strict";
 
+function toHex(value, length = 1) {
+  return value.toString(16).padStart(length, '0').toUpperCase();
+}
+
 let Chip8Emulator = (function() {
   const MEMORY_SIZE = 0x1000;
   const FONT_START_ADDRESS = 0x50;
@@ -35,17 +39,19 @@ let Chip8Emulator = (function() {
   };
 
   function Chip8Emulator() {
+    this.backBuffer = new Uint8Array(this.displayWidth * this.displayHeight);
     this.cyclesPerFrame = 20;
+    this.displayWidth = 64;
+    this.displayHeight = 32;
+    this.debugging = false;
     this.reset();
   }
 
   Chip8Emulator.prototype.reset = function() {
     this.memory = new Uint8Array(MEMORY_SIZE);
     this.memory.set(FONT_DATA, FONT_START_ADDRESS);
-    this.pixels = new Uint8Array(64 * 32);
-    this.backBuffer = new Uint8Array(64 * 32);
+    this.pixels = new Uint8Array(this.displayWidth * this.displayHeight);
     this.pixels.fill(0);
-    this.backBuffer.fill(0);
     this.stack = [];
     this.registers = new Uint8Array(NUM_REGISTERS);
     this.I = 0;
@@ -56,8 +62,6 @@ let Chip8Emulator = (function() {
     this.haltedMsg = '';
     this.currKey = undefined;
     this.waiting = false;
-    this.waitingRegister = undefined;
-    this.clearDisplay = false;
   };
 
   Chip8Emulator.prototype.getKeyCode = function(key) {
@@ -71,17 +75,40 @@ let Chip8Emulator = (function() {
 
   Chip8Emulator.prototype.loadProgram = function(programData) {
     this.reset();
-    this.pixels.fill(0);
     this.memory.set(programData, PROGRAM_START_ADDRESS);
   };
+
+  Chip8Emulator.prototype.fetchInstruction = function(memoryLocation) {
+    return (this.memory[memoryLocation] << 8) | this.memory[memoryLocation + 1];
+  }
 
   Chip8Emulator.prototype.cycle = function() {
     if (this.PC >= MEMORY_SIZE - 2) {
       this.halt(`Invalid Program Counter: ${this.PC}`);
       return;
     }
-    let instruction = (this.memory[this.PC] << 8) | this.memory[this.PC + 1];
+    let instructions = [];
+    if (this.debugging) {
+      let tempPC = PROGRAM_START_ADDRESS;
+      while (tempPC < MEMORY_SIZE) {
+        let instruction = this.fetchInstruction(tempPC);
+        if (instruction !== 0) {
+          instructions.push({ 
+            address: toHex(tempPC, 4), 
+            code: toHex(instruction, 4), 
+            str: decode(instruction).str,
+          });
+        }
+        tempPC += 2;
+      }
+    }
+    let instruction = this.fetchInstruction(this.PC);
     this.PC += 2;
+    decode(instruction).op.call(this);
+    return instructions;
+  }
+
+  function decode(instruction) {
     let address =  instruction & 0xFFF;
     let nibble = instruction & 0xF;
     let byte = instruction & 0xFF;
@@ -89,198 +116,299 @@ let Chip8Emulator = (function() {
     let x = (instruction >> 8) & 0xF;
     let opcode = (instruction >> 12) & 0xF;
 
+    const unknownInstruction = { str: '<unknown>', op() { }, };
+  
     if (instruction === 0x00E0) {
-      this.pixels.fill(0);
-      this.clearDisplay = true;
-      return;
+      return {
+        str: `CLS`,
+        op() { this.pixels.fill(0); },
+      };
     }
     if (instruction === 0x00EE) {
-      if (this.stack.length === 0) {
-        this.halt('Attempt to pop from empty stack');
-        return;
-      }
-      this.PC = this.stack.pop();
-      return;
+      return {
+        str: 'RET',
+        op() {
+          if (this.stack.length === 0) {
+            this.halt('Attempt to pop from empty stack');
+            return;
+          }
+          this.PC = this.stack.pop();
+        },
+      };
     }
-
     switch (opcode) {
       case 0x1:
-        this.PC = address;
-        break;
+        return {
+          str: `JP ${toHex(address, 3)}`,
+          op() { this.PC = address; },
+        };
       case 0x2:
-        this.stack.push(this.PC);
-        this.PC = address;
-        break;
+        return {
+          str: `CALL ${toHex(address, 3)}`,
+          op() {
+            this.stack.push(this.PC);
+            this.PC = address;
+          },
+        };
       case 0x3:
-        if (this.registers[x] === byte) this.PC += 2;
-        break;
+        return {
+          str: `SE_X_NN ${toHex(x)} ${toHex(byte, 2)}`,
+          op() {
+            if (this.registers[x] === byte) this.PC += 2;
+          },
+        };
       case 0x4:
-        if (this.registers[x] !== byte) this.PC += 2;
-        break;
+        return {
+          str: `SNE_X_NN ${toHex(x)} ${toHex(byte, 2)}`,
+          op() { if (this.registers[x] !== byte) this.PC += 2; },
+        };
       case 0x5:
-        if (this.registers[x] === this.registers[y]) this.PC += 2;
-        break;
+        return {
+          str: `SE_X_Y ${toHex(x)} ${toHex(y)}`,
+          op() { if (this.registers[x] === this.registers[y]) this.PC += 2; },
+        };
       case 0x6:
-        this.registers[x] = byte;
-        break;
+        return {
+          str: `LD_X_NN ${toHex(x)} ${toHex(byte, 2)}`,
+          op() { this.registers[x] = byte },
+        };
       case 0x7:
-        this.registers[x] = (this.registers[x] + byte) & 0xFF;
-        break;
+        return {
+          str: `ADD_X_NN ${toHex(x)} ${toHex(byte, 2)}`,
+          op() { this.registers[x] = (this.registers[x] + byte) & 0xFF; },
+        };
       case 0x8:
         switch (nibble) {
           case 0x0:
-            this.registers[x] = this.registers[y];
-            break;
+            return {
+              str: `LD_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() { this.registers[x] = this.registers[y]; },
+            };
           case 0x1:
-            this.registers[x] |= this.registers[y];
-            break;
+            return {
+              str: `OR_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() { this.registers[x] |= this.registers[y]; },
+            };
           case 0x2:
-            this.registers[x] &= this.registers[y];
-            break;
+            return {
+              str: `AND_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() { this.registers[x] &= this.registers[y]; },
+            };
           case 0x3:
-            this.registers[x] ^= this.registers[y];
-            break;
+            return {
+              str: `XOR_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() { this.registers[x] ^= this.registers[y]; },
+            };
           case 0x4:
-            let result = this.registers[x] + this.registers[y];
-            if (result > 255) this.registers[0xF] = 1;
-            this.registers[x] = result & 0xFF;
-            break;
+            return {
+              str: `ADD_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() {
+                let result = this.registers[x] + this.registers[y];
+                if (result > 255) this.registers[0xF] = 1;
+                this.registers[x] = result & 0xFF;
+              },
+            };
           case 0x5:
-            if (this.registers[x] > this.registers[y]) {
-              this.registers[0xF] = 1;
-            } else {
-              this.registers[0xF] = 0;
-            }
-            this.registers[x] = (this.registers[x] - this.registers[y]) & 0xFF;
-            break;
+            return {
+              str: `SUB_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() {
+                if (this.registers[x] > this.registers[y]) {
+                  this.registers[0xF] = 1;
+                } else {
+                  this.registers[0xF] = 0;
+                }
+                this.registers[x] = (this.registers[x] - this.registers[y]) & 0xFF;
+              },
+            };
           case 0x6:
-            if ((0x1 & this.registers[x]) !== 0) {
-              this.registers[0xF] = 1;
-            } else {
-              this.registers[0xF] = 0;
-            }
-            this.registers[x] = (this.registers[x] >>> 1) & 0xFF;
-            break;
+            return {
+              str: `SHR_X ${toHex(x)}`,
+              op() {
+                if ((0x1 & this.registers[x]) !== 0) {
+                  this.registers[0xF] = 1;
+                } else {
+                  this.registers[0xF] = 0;
+                }
+                this.registers[x] = (this.registers[x] >>> 1) & 0xFF;
+              },
+            };
           case 0x7:
-            if (this.registers[y] > this.registers[x]) {
-              this.registers[0xF] = 1;
-            } else {
-              this.registers[0xF] = 0;
-            }
-            this.registers[x] = (this.registers[y] - this.registers[x]) & 0xFF;
-            break;
+            return {
+              str: `SUBN_X_Y ${toHex(x)} ${toHex(y)}`,
+              op() {
+                if (this.registers[y] > this.registers[x]) {
+                  this.registers[0xF] = 1;
+                } else {
+                  this.registers[0xF] = 0;
+                }
+                this.registers[x] = (this.registers[y] - this.registers[x]) & 0xFF;
+              },
+            };
           case 0xE:
-            if ((0x80 & this.registers[x]) !== 0) {
-              this.registers[0xF] = 1;
-            } else {
-              this.registers[0xF] = 0;
-            }
-            this.registers[x] = (this.registers[x] << 1) & 0xFF;
-            break;
+            return {
+              str: `SHL_X ${toHex(x)}`,
+              op() {
+                if ((0x80 & this.registers[x]) !== 0) {
+                  this.registers[0xF] = 1;
+                } else {
+                  this.registers[0xF] = 0;
+                }
+                this.registers[x] = (this.registers[x] << 1) & 0xFF;
+              },
+            };
+          default:
+            return unknownInstruction;
         }
-        break;
       case 0x9:
-        if (this.registers[x] !== this.registers[y]) this.PC += 2;
-        break;
+        return {
+          str: `SNE_X_Y ${toHex(x)} ${toHex(y)}`,
+          op() { if (this.registers[x] !== this.registers[y]) this.PC += 2; },
+        };
       case 0xA:
-        this.I = address;
-        break;
+        return {
+          str: `LD_I_NNN ${toHex(address, 3)}`,
+          op() { this.I = address },
+        };
       case 0xB:
-        this.PC = address + this.registers[0]; 
-        break
+        return {
+          str: `JP_NNN ${toHex(address, 3)}`,
+          op() { this.PC = address + this.registers[0]; },
+        };
       case 0xC:
-        this.registers[x] = Math.floor(Math.random() * 255) & byte;
-        break;
+        return {
+          str: `RND_X_NN ${toHex(x)} ${toHex(byte)}`,
+          op() { this.registers[x] = Math.floor(Math.random() * 255) & byte },
+        };
       case 0xD:
-        let yPos = this.registers[y] & 31;
-        this.registers[0xF] = 0;
-        for (let row = 0; row < nibble && yPos < 32; row += 1, yPos += 1) {
-          let mask = 0x80;
-          let xPos = this.registers[x] & 63;
-          while (mask > 0) {
-            let masked = this.memory[this.I + row] & mask;
-            if (masked !== 0) {
-              let index = (yPos * 64) + xPos;
-              if (this.pixels[index] === 1) {
-                this.pixels[index] = 0
-                this.registers[0xF] = 1;
-              } else {
-                this.pixels[index] = 1;
+        return {
+          str: `DRW_X_Y_N ${toHex(x)} ${toHex(y)} ${toHex(nibble)}`,
+          op() {
+            let yPos = this.registers[y] & (this.displayHeight - 1);
+            this.registers[0xF] = 0;
+            for (let row = 0; row < nibble && yPos < this.displayHeight; row += 1, yPos += 1) {
+              let mask = 0x80;
+              let xPos = this.registers[x] & (this.displayWidth - 1);
+              while (mask > 0) {
+                let masked = this.memory[this.I + row] & mask;
+                if (masked !== 0) {
+                  let index = (yPos * this.displayWidth) + xPos;
+                  if (this.pixels[index] === 1) {
+                    this.pixels[index] = 0
+                    this.registers[0xF] = 1;
+                  } else {
+                    this.pixels[index] = 1;
+                  }
+                }
+                mask = mask >>> 1;
+                if (xPos === (this.displayWidth - 1)) break;
+                xPos += 1;
               }
             }
-            mask = mask >>> 1;
-            if (xPos === 63) break;
-            xPos += 1;
           }
-        }
-        break;
+        };
       case 0xE:
-        if (byte === 0x9E && this.currKey === this.registers[x]) {
-          this.PC += 2;
-        } else if (byte === 0xA1 && this.currKey !== this.registers[x]) {
-          this.PC += 2;
-        }
-        break;
+        return {
+          str: `SKP_X ${toHex(x)}`,
+          op() {
+            if (byte === 0x9E && this.currKey === this.registers[x]) {
+              this.PC += 2;
+            } else if (byte === 0xA1 && this.currKey !== this.registers[x]) {
+              this.PC += 2;
+            }
+          },
+        };
       case 0xF:
         switch (byte) {
           case 0x07:
-            this.registers[x] = this.dt;
-            break;
+            return {
+              str: `LD_X_DT ${toHex(x)}`,
+              op() { this.registers[x] = this.dt },
+            };
           case 0x0A:
-            if (this.currKey !== undefined) {
-              this.registers[x] = this.currKey;
-              this.currKey = undefined;
-            } else {
-              this.waiting = true;
-              this.waitingRegister = x;
-            }
-            break;
+            return {
+              str: `LD_X_K ${toHex(x)}`,
+              op() {
+                if (this.currKey !== undefined) {
+                  this.registers[x] = this.currKey;
+                  this.currKey = undefined;
+                } else {
+                  this.waiting = (code => {
+                    this.registers[x] = code;
+                    this.waiting = undefined;
+                  });
+                }
+              },
+            };
           case 0x15:
-            this.dt = this.registers[x];
-            break;
+            return {
+              str: `LD_DT_X ${toHex(x)}`,
+              op() { this.dt = this.registers[x]; },
+            };
           case 0x18:
-            this.st = this.registers[x];
-            break;
+            return {
+              str: `LD_ST_X ${toHex(x)}`,
+              op() { this.st = this.registers[x]; },
+            };
           case 0x1E:
-            this.I += this.registers[x];
-            if (this.I > 0x1000) this.registers[0xF] = 1;
-            break;
+            return {
+              str: `ADD_I_X ${toHex(x)}`,
+              op() {
+                this.I += this.registers[x];
+                if (this.I > MEMORY_SIZE) this.registers[0xF] = 1;
+              },
+            };
           case 0x29:
-            this.I = 0x50 + (this.registers[x] * 5);
-            break;
+            return {
+              str: `LD_F_X ${toHex(x)}`,
+              op() { this.I = FONT_START_ADDRESS + (this.registers[x] * 5); },
+            };
           case 0x33:
-            if (this.I + 2 >= MEMORY_SIZE) {
-              this.halt(`Invalid memory access: ${this.I + 2}`);
-              return;
-            }
-            let value = this.registers[x];
-            this.memory[this.I] = Math.floor(value / 100);
-            this.memory[this.I + 1] = Math.floor(value / 10) % 10;
-            this.memory[this.I + 2] = value % 10;
-            break;
+            return {
+              str: `LD_B_X ${toHex(x)}`,
+              op() {
+                if (this.I + 2 >= MEMORY_SIZE) {
+                  this.halt(`Invalid memory access: ${this.I + 2}`);
+                  return;
+                }
+                let value = this.registers[x];
+                this.memory[this.I] = Math.floor(value / 100);
+                this.memory[this.I + 1] = Math.floor(value / 10) % 10;
+                this.memory[this.I + 2] = value % 10;
+              },
+            };
           case 0x55:
-            if (this.I + x >= MEMORY_SIZE) {
-              this.halt(`Invalid memory access: ${this.I + x}`);
-              return;
-            }
-            for (let num = 0; num <= x; num += 1) {
-              this.memory[this.I + num] = this.registers[num];
-            }
-            break;
+            return {
+              str: `LD_I_X ${toHex(x)}`,
+              op() {
+                if (this.I + x >= MEMORY_SIZE) {
+                  this.halt(`Invalid memory access: ${this.I + x}`);
+                  return;
+                }
+                for (let num = 0; num <= x; num += 1) {
+                  this.memory[this.I + num] = this.registers[num];
+                }
+              },
+            };
           case 0x65:
-            if (this.I + x >= MEMORY_SIZE) {
-              this.halt(`Invalid memory access: ${this.I + x}`);
-              return;
-            }
-            for (let num = 0; num <= x; num += 1) {
-              this.registers[num] = this.memory[this.I + num];
-            }
-            break;
+            return {
+              str: `LD_X_I ${toHex(x)}`,
+              op() {
+                if (this.I + x >= MEMORY_SIZE) {
+                  this.halt(`Invalid memory access: ${this.I + x}`);
+                  return;
+                }
+                for (let num = 0; num <= x; num += 1) {
+                  this.registers[num] = this.memory[this.I + num];
+                }
+              },
+            };
+          default: {
+            return unknownInstruction;
+          }
         }
         break;
       default:
-        console.log(`unrecognized instruction: ${instruction}`)
-        break;
+        return unknownInstruction;
     }
   }
 

@@ -24,3 +24,35 @@ canvas {
   border-radius: 5px;
   margin: 0 5px;
 }
+
+#instruction-panel {
+  width: 300px;
+  max-height: 300px;
+  margin: 20px 0;
+  overflow: scroll;
+  overflow-x: hidden;
+  background-color: black;
+  text-align: center;
+}
+
+#instructions {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+#instructions td {
+  color: white;
+  border: solid 1px white;
+  text-align: left;
+}
+
+#instructions span {
+  display: inline-block;
+  margin: 5px 10px;
+}
+
+.curr-instruction {
+  background-color: darkgrey;
+  color: black;
+}
